@@ -14,6 +14,22 @@ from face_model import Face
 logger = logging.getLogger(__name__)
 
 
+def _resolve_face_mesh_constructor():
+    # Some mediapipe builds expose FaceMesh at mp.solutions, others only under
+    # mediapipe.python.solutions.
+    try:
+        return mp.solutions.face_mesh.FaceMesh
+    except Exception:
+        pass
+
+    try:
+        from mediapipe.python.solutions import face_mesh as mp_face_mesh
+
+        return mp_face_mesh.FaceMesh
+    except Exception:
+        return None
+
+
 class LandmarkEstimator:
     def __init__(self, config: DictConfig):
         self.padding = float(config.face_detector.padding)  # padding for improving face detection of cropped images
@@ -36,7 +52,15 @@ class LandmarkEstimator:
             self._init_face_mesh_detector()
 
     def _init_face_mesh_detector(self):
-        self.detector = mp.solutions.face_mesh.FaceMesh(
+        face_mesh_ctor = _resolve_face_mesh_constructor()
+        if face_mesh_ctor is None:
+            raise RuntimeError(
+                "FaceMesh API not available in current mediapipe installation. "
+                "Use --mediapipe-backend tasks with a valid --mediapipe-task-model, "
+                "or install a mediapipe build that includes FaceMesh."
+            )
+
+        self.detector = face_mesh_ctor(
             max_num_faces=self.max_num_faces,
             static_image_mode=self.static_image_mode,
             refine_landmarks=True,
@@ -104,7 +128,12 @@ class LandmarkEstimator:
                 logger.warning(f"Could not initialize Tasks CPU fallback: {exc}")
 
         logger.warning("Falling back to mediapipe FaceMesh backend.")
-        self._init_face_mesh_detector()
+        try:
+            self._init_face_mesh_detector()
+        except Exception as exc:
+            raise RuntimeError(
+                "Tasks backend initialization failed and FaceMesh fallback is unavailable."
+            ) from exc
 
     def detect_faces(self, image: np.ndarray) -> List[Face]:
         if self.padding > 0: #  Modify image with padding
