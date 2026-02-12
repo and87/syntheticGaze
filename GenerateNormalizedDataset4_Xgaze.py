@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -234,6 +235,23 @@ def fetch_url_text(url: str, timeout: int) -> str:
         return resp.read().decode("utf-8", errors="ignore")
 
 
+def fetch_url_text_with_retries(url: str, timeout: int, retries: int = 3, base_sleep: float = 1.5) -> str:
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, max(1, retries) + 1):
+        try:
+            return fetch_url_text(url, timeout=timeout)
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= retries:
+                break
+            sleep_s = base_sleep * attempt
+            logger.warning(
+                f"Failed to fetch {url} (attempt {attempt}/{retries}): {exc}. Retrying in {sleep_s:.1f}s..."
+            )
+            time.sleep(sleep_s)
+    raise RuntimeError(f"Failed to fetch {url} after {retries} attempts: {last_exc}")
+
+
 def list_remote_files(base_url: str, timeout: int) -> List[str]:
     if not base_url.endswith("/"):
         base_url = base_url + "/"
@@ -313,18 +331,23 @@ def iter_remote_annotation_entries(
         subject_from_file = normalize_subject_id(subject_match.group(1)) if subject_match else "subject_unknown"
         if allowed_subjects is not None and subject_from_file not in allowed_subjects:
             continue
-        logger.info(f"Reading annotations from {file_url} (subject={subject_from_file})")
-        req = urllib.request.Request(file_url, headers={"User-Agent": "SyntheticGaze/1.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            text_stream = io.TextIOWrapper(resp, encoding="utf-8", errors="ignore")
-            for line in text_stream:
-                entry = parse_annotation_line(
-                    line,
-                    subject_from_file=subject_from_file,
-                    parse_gaze_point_cam=parse_gaze_point_cam,
-                )
-                if entry is not None:
-                    yield entry
+        logger.info(f"Loading annotations from {file_url} (subject={subject_from_file})")
+        try:
+            text = fetch_url_text_with_retries(file_url, timeout=timeout, retries=3)
+        except Exception as exc:
+            logger.warning(f"Skipping annotation file {file_url}: {exc}")
+            continue
+
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        logger.info(f"Loaded {len(lines)} annotation rows for {subject_from_file}")
+        for line in lines:
+            entry = parse_annotation_line(
+                line,
+                subject_from_file=subject_from_file,
+                parse_gaze_point_cam=parse_gaze_point_cam,
+            )
+            if entry is not None:
+                yield entry
 
 
 class CalibrationProvider:
