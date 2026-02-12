@@ -95,6 +95,46 @@ def parse_camera_ids(text: Optional[str]) -> Set[int]:
     return out
 
 
+def normalize_subject_id(token: str) -> str:
+    value = token.strip().lower()
+    if not value:
+        return value
+    match = re.fullmatch(r"subject(\d+)", value)
+    if match:
+        return f"subject{int(match.group(1)):04d}"
+    if value.isdigit():
+        return f"subject{int(value):04d}"
+    return value
+
+
+def parse_subject_filter(subjects_text: Optional[str], subjects_file: Optional[str]) -> Optional[Set[str]]:
+    selected: Set[str] = set()
+
+    if subjects_text:
+        for tok in re.split(r"[,\s;]+", subjects_text):
+            tok = tok.strip()
+            if not tok:
+                continue
+            selected.add(normalize_subject_id(tok))
+
+    if subjects_file:
+        try:
+            with open(subjects_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    for tok in re.split(r"[,\s;]+", stripped):
+                        tok = tok.strip()
+                        if not tok:
+                            continue
+                        selected.add(normalize_subject_id(tok))
+        except Exception as exc:
+            raise SystemExit(f"Could not read --subjects-file '{subjects_file}': {exc}") from exc
+
+    return selected if selected else None
+
+
 def load_rotate_camera_ids_from_orientation(path: str) -> Set[int]:
     rotate_camera_ids: Set[int] = set()
     try:
@@ -135,9 +175,9 @@ def parse_camera_id_from_name(name: str) -> int:
 def parse_subject_from_path(path_str: str) -> str:
     match = re.search(r"(subject\d+)", path_str.lower())
     if match:
-        return match.group(1)
+        return normalize_subject_id(match.group(1))
     first = path_str.replace("\\", "/").split("/")[0]
-    return first if first else "subject_unknown"
+    return normalize_subject_id(first) if first else "subject_unknown"
 
 
 def make_sample_key(subject: str, camera_id: int, image_rel_path: str) -> SampleKey:
@@ -261,6 +301,7 @@ def iter_remote_annotation_entries(
     annotation_root_url: str,
     timeout: int,
     parse_gaze_point_cam: bool = True,
+    allowed_subjects: Optional[Set[str]] = None,
 ) -> Iterator[AnnotationEntry]:
     files = list_remote_files(annotation_root_url, timeout=timeout)
     if not files:
@@ -269,7 +310,9 @@ def iter_remote_annotation_entries(
 
     for file_url in files:
         subject_match = re.search(r"(subject\d+)\.csv$", file_url.lower())
-        subject_from_file = subject_match.group(1) if subject_match else "subject_unknown"
+        subject_from_file = normalize_subject_id(subject_match.group(1)) if subject_match else "subject_unknown"
+        if allowed_subjects is not None and subject_from_file not in allowed_subjects:
+            continue
         logger.info(f"Reading annotations from {file_url} (subject={subject_from_file})")
         req = urllib.request.Request(file_url, headers={"User-Agent": "SyntheticGaze/1.0"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -527,6 +570,7 @@ def process_local_images(
     image_root: str,
     max_samples: Optional[int] = None,
     resume_after: Optional[SampleKey] = None,
+    allowed_subjects: Optional[Set[str]] = None,
 ):
     exts = {".jpg", ".jpeg", ".png", ".bmp"}
     image_paths: List[str] = []
@@ -545,6 +589,8 @@ def process_local_images(
             break
         rel = os.path.relpath(path, image_root).replace("\\", "/")
         subject = parse_subject_from_path(rel)
+        if allowed_subjects is not None and subject not in allowed_subjects:
+            continue
         camera_id = parse_camera_id_from_name(os.path.basename(path))
         current_key = make_sample_key(subject, camera_id, rel)
         if resuming:
@@ -585,6 +631,7 @@ def process_remote_stream(
     timeout: int,
     max_samples: Optional[int] = None,
     resume_after: Optional[SampleKey] = None,
+    allowed_subjects: Optional[Set[str]] = None,
 ):
     annotation_root = urllib.parse.urljoin(base_url if base_url.endswith("/") else base_url + "/", annotation_subdir + "/")
     train_root = urllib.parse.urljoin(base_url if base_url.endswith("/") else base_url + "/", train_subdir + "/")
@@ -605,6 +652,7 @@ def process_remote_stream(
             annotation_root,
             timeout=timeout,
             parse_gaze_point_cam=parse_gaze_point_cam,
+            allowed_subjects=allowed_subjects,
         ):
             if max_samples is not None and processed >= max_samples:
                 break
@@ -740,6 +788,16 @@ def main():
     )
     parser.add_argument("--annotation-subdir", default="annotation_train")
     parser.add_argument("--train-subdir", default="train")
+    parser.add_argument(
+        "--subjects",
+        default=None,
+        help="Optional subject filter: comma/space-separated values (e.g. subject0001,subject0002 or 1,2).",
+    )
+    parser.add_argument(
+        "--subjects-file",
+        default=None,
+        help="Optional text file with subjects (one per line or comma-separated).",
+    )
     parser.add_argument("--download-timeout", type=int, default=40)
     parser.add_argument(
         "--resume",
@@ -814,6 +872,13 @@ def main():
         equalize_luma=bool(args.equalize_luma),
     )
     writer = CsvWriter(output_csv_path=args.output_csv, batch_size=args.batch_size)
+    allowed_subjects = parse_subject_filter(args.subjects, args.subjects_file)
+    if allowed_subjects is not None:
+        preview = ", ".join(sorted(allowed_subjects)[:10])
+        suffix = " ..." if len(allowed_subjects) > 10 else ""
+        logger.info(
+            f"Subject filter enabled ({len(allowed_subjects)} subjects): {preview}{suffix}"
+        )
     resume_after = get_last_csv_sample_key(args.output_csv) if args.resume else None
     if resume_after is not None:
         logger.info(
@@ -831,6 +896,7 @@ def main():
             image_root=args.dataset_root,
             max_samples=args.max_samples,
             resume_after=resume_after,
+            allowed_subjects=allowed_subjects,
         )
     else:
         process_remote_stream(
@@ -842,6 +908,7 @@ def main():
             timeout=args.download_timeout,
             max_samples=args.max_samples,
             resume_after=resume_after,
+            allowed_subjects=allowed_subjects,
         )
 
 

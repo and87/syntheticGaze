@@ -368,3 +368,22 @@ Resume:
 - Per test veloci usare --max-samples 1/4/10.
 - In Windows usare virgolette attorno ai path con spazi.
 - Per Ubuntu GPU verificare driver/NVIDIA e disponibilita' delegate.
+
+
+===============================================================================
+11) PARALLELIZZAZIONE PER SOGGETTI (NUOVO)
+===============================================================================
+
+Nuovi parametri in GenerateNormalizedDataset4_Xgaze.py:
+- --subjects
+  Filtro soggetti inline (esempio: --subjects "subject0001,subject0002" oppure --subjects "1,2").
+- --subjects-file
+  File di soggetti (uno per riga oppure separati da virgola/spazio).
+
+Nuovi script:
+- scripts/make_subject_shards_from_remote.py
+  Scarica la lista subject*.csv da annotation e genera shard_00.txt ... shard_07.txt.
+- run_xgaze_remote_train_parallel_8.sh
+  Avvia 8 processi in parallelo (uno per shard) con CSV partizionati.
+- scripts/merge_csv_parts.py
+  Unisce i CSV partizionati in un unico CSV finale.
