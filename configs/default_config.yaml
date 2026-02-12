@@ -1,0 +1,32 @@
+device: cpu
+model:
+  name: MLP
+face_detector:
+  mediapipe_max_num_faces: 3
+  mediapipe_static_image_mode: false
+  mediapipe_min_det_conf: 0.5
+  mediapipe_min_track_conf: 0.5
+  ultralight: true
+gaze_estimator:
+  use_dummy_camera_params: true
+  camera_params: configs/camera_params.yaml
+  scaler_path: models/gaze_data_scaler.joblib
+  model_path: models/gaze_estimation_model.pth
+demo:
+  use_camera: true
+  display_on_screen: true
+  wait_time: 1
+  image_path: null
+  video_path: null
+  reference_path: null
+  output_dir: null
+  output_csv: null
+  output_file_extension: avi
+  head_pose_axis_length: 0.05
+  gaze_visualization_length: 0.05
+  show_menu: false
+  show_bbox: false
+  show_head_pose: true
+  show_landmarks: false
+  show_normalized_image: false
+  show_template_model: false
