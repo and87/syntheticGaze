@@ -1,6 +1,6 @@
-RIEPILOGO MODIFICHE APPORTATE NELLA SESSIONE
-Progetto: SyntheticGaze
-Data riepilogo: 2026-02-11
+# SyntheticGaze
+
+README operativo del progetto (stato aggiornato al 2026-02-11).
 
 ===============================================================================
 1) OBIETTIVO DELLE MODIFICHE
