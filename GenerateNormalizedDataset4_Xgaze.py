@@ -74,6 +74,18 @@ class AnnotationEntry:
 SampleKey = Tuple[str, int, str]
 
 
+@dataclass(frozen=True)
+class GazeLabelConfig:
+    # Which frame to store in CSV gaze_{x,y,z}.
+    # normalized: apply R_norm to camera gaze vector (default current behavior)
+    # camera: keep camera-frame gaze vector
+    space: str = "normalized"
+    # as_is: keep direction, invert: multiply by -1
+    sign: str = "as_is"
+    # If True, swap x and y components after space/sign transform.
+    swap_xy: bool = False
+
+
 def first_existing_path(candidates: List[str]) -> Optional[str]:
     for path in candidates:
         if path and os.path.exists(path):
@@ -227,6 +239,38 @@ def vector_to_pitch_yaw(v: np.ndarray) -> Tuple[float, float]:
     pitch = float(np.arcsin(np.clip(y, -1.0, 1.0)))
     yaw = float(np.arctan2(x, -z))
     return yaw, pitch
+
+
+def transform_gaze_label(
+    gaze_vec_cam: np.ndarray,
+    r_norm: np.ndarray,
+    cfg: GazeLabelConfig,
+) -> Optional[np.ndarray]:
+    vec = np.asarray(gaze_vec_cam, dtype=np.float64).reshape(3)
+    n_cam = np.linalg.norm(vec)
+    if not np.isfinite(n_cam) or n_cam <= 0:
+        return None
+    vec = vec / n_cam
+
+    if cfg.space == "normalized":
+        out = np.asarray(r_norm, dtype=np.float64) @ vec
+    elif cfg.space == "camera":
+        out = vec.copy()
+    else:
+        raise ValueError(f"Unsupported gaze label space: {cfg.space}")
+
+    if cfg.sign == "invert":
+        out = -out
+    elif cfg.sign != "as_is":
+        raise ValueError(f"Unsupported gaze label sign: {cfg.sign}")
+
+    if cfg.swap_xy:
+        out = np.array([out[1], out[0], out[2]], dtype=np.float64)
+
+    n_out = np.linalg.norm(out)
+    if not np.isfinite(n_out) or n_out <= 0:
+        return None
+    return out / n_out
 
 
 def fetch_url_text(url: str, timeout: int) -> str:
@@ -648,6 +692,7 @@ def process_local_images(
 def process_remote_stream(
     pipeline: LandmarkPipeline,
     writer: CsvWriter,
+    gaze_label_cfg: GazeLabelConfig,
     base_url: str,
     annotation_subdir: str,
     train_subdir: str,
@@ -709,14 +754,10 @@ def process_remote_stream(
                 pitch = np.nan
                 if entry.gaze_point_cam is not None:
                     gaze_vec_cam = entry.gaze_point_cam - head_t
-                    norm = np.linalg.norm(gaze_vec_cam)
-                    if norm > 0:
-                        gaze_vec_cam = gaze_vec_cam / norm
-                        gaze_vec_norm = R_norm @ gaze_vec_cam
-                        norm2 = np.linalg.norm(gaze_vec_norm)
-                        if norm2 > 0:
-                            gaze_vec_norm = gaze_vec_norm / norm2
-                            yaw, pitch = vector_to_pitch_yaw(gaze_vec_norm)
+                    transformed = transform_gaze_label(gaze_vec_cam, R_norm, gaze_label_cfg)
+                    if transformed is not None:
+                        gaze_vec_norm = transformed
+                        yaw, pitch = vector_to_pitch_yaw(gaze_vec_norm)
 
                 row = build_row(
                     subject=entry.subject,
@@ -806,6 +847,32 @@ def main():
     parser.add_argument("--batch-size", type=int, default=100)
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument(
+        "--compat-preset",
+        choices=["none", "legacy_xgaze_v1"],
+        default="none",
+        help=(
+            "Optional compatibility preset for CSV gaze labels. "
+            "legacy_xgaze_v1 applies normalized-space labels with invert+swap_xy."
+        ),
+    )
+    parser.add_argument(
+        "--gaze-label-space",
+        choices=["normalized", "camera"],
+        default="normalized",
+        help="Frame used for output gaze labels (gaze_x/y/z).",
+    )
+    parser.add_argument(
+        "--gaze-label-sign",
+        choices=["as_is", "invert"],
+        default="as_is",
+        help="Direction transform for output gaze labels.",
+    )
+    parser.add_argument(
+        "--gaze-label-swap-xy",
+        action="store_true",
+        help="Swap x/y components of output gaze labels.",
+    )
+    parser.add_argument(
         "--base-url",
         default="https://dataset.ait.ethz.ch/downloads/T3fODqLSS1/eth-xgaze/raw/data/",
     )
@@ -828,6 +895,25 @@ def main():
         help="Resume from the last row already present in --output-csv.",
     )
     args = parser.parse_args()
+
+    if args.compat_preset == "legacy_xgaze_v1":
+        # Empirical compatibility mode for legacy ETH-XGaze-style label convention.
+        args.gaze_label_space = "normalized"
+        args.gaze_label_sign = "invert"
+        args.gaze_label_swap_xy = True
+
+    gaze_label_cfg = GazeLabelConfig(
+        space=str(args.gaze_label_space),
+        sign=str(args.gaze_label_sign),
+        swap_xy=bool(args.gaze_label_swap_xy),
+    )
+    logger.info(
+        "Gaze label convention: "
+        f"preset={args.compat_preset}, "
+        f"space={gaze_label_cfg.space}, "
+        f"sign={gaze_label_cfg.sign}, "
+        f"swap_xy={gaze_label_cfg.swap_xy}"
+    )
 
     config_path = first_existing_path(
         [args.config, "benchmark_config.yaml", os.path.join("configs", "benchmark_config.yaml")]
@@ -925,6 +1011,7 @@ def main():
         process_remote_stream(
             pipeline=pipeline,
             writer=writer,
+            gaze_label_cfg=gaze_label_cfg,
             base_url=args.base_url,
             annotation_subdir=args.annotation_subdir,
             train_subdir=args.train_subdir,

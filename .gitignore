@@ -2,3 +2,5 @@ env/
 __pycache__/
 *.pyc
 ETH-GAZE DATASET/
+
+downloaded_csv/
